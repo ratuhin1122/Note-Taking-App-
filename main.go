@@ -37,7 +37,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() tea.View {
-    welcome := "Welcome To Terminal Notes"
+    welcome := "Welcome To Terminal Notes 🧠 "
 	return tea.NewView(welcome)
 }
 
