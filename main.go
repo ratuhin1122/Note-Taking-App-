@@ -17,11 +17,28 @@ func (m model) Init() tea.Cmd {
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	return  m, nil
+	switch msg := msg.(type) {
+
+    // Is it a key press?
+    case tea.KeyPressMsg:
+
+        // Cool, what was the actual key pressed?
+        switch msg.String() {
+
+        // These keys should exit the program.
+        case "ctrl+c", "q":
+            return m, tea.Quit
+
+        
+        }
+    }
+
+    return m, nil
 }
 
 func (m model) View() tea.View {
-    return tea.NewView(m.msg)
+    welcome := "Welcome To Terminal Notes"
+	return tea.NewView(welcome)
 }
 
 func initialModel() model {
