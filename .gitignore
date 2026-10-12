@@ -1,0 +1,10 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+note-taking-app.exe
+
+# Output binary directory
+bin/
