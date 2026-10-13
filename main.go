@@ -4,38 +4,49 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
 )
 
 type model struct {
-	msg string
+	msg    string
+	offset int
+}
+
+// tickMsg carries the timestamp for animation frames
+type tickMsg time.Time
+
+// tickCmd sends a tickMsg every 50ms to drive the animation
+func tickCmd() tea.Cmd {
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 func (m model) Init() tea.Cmd {
-    // Just return `nil`, which means "no I/O right now, please."
-    return nil
+	// Start ticking as soon as the app starts
+	return tickCmd()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 
-    // Is it a key press?
-    case tea.KeyPressMsg:
+	// Handle key presses
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "ctrl+c", "ctrl+q", "q":
+			return m, tea.Quit
+		}
 
-        // Cool, what was the actual key pressed?
-        switch msg.String() {
+	// Advance animation on each tick
+	case tickMsg:
+		m.offset++
+		return m, tickCmd()
+	}
 
-        // These keys should exit the program.
-        case "ctrl+c", "q":
-            return m, tea.Quit
-
-        
-        }
-    }
-
-    return m, nil
+	return m, nil
 }
 
 func (m model) View() tea.View {
@@ -78,21 +89,55 @@ func (m model) View() tea.View {
 		).
 		Margin(1, 2)
 
-	return tea.NewView(cardStyle.Render(sb.String()))
+	// Help bar text
+	help := "Ctrl+N: New Note | Ctrl+L: List Notes | Ctrl+S: Save | Esc: Back | Ctrl+Q: Quit"
+	helpRunes := []rune(help)
+
+	// Flowing gradient palette for the help text
+	helpPalette := lipgloss.Blend1D(len(helpRunes),
+		lipgloss.Color("#50FA7B"), // Mint
+		lipgloss.Color("#8BE9FD"), // Cyan
+		lipgloss.Color("#BD93F9"), // Lavender
+		lipgloss.Color("#FF79C6"), // Pink
+		lipgloss.Color("#FFB86C"), // Orange
+		lipgloss.Color("#50FA7B"), // Smooth cycle back to Mint
+	)
+
+	// Build the animated gradient text by shifting colors using m.offset
+	var helpSb strings.Builder
+	paletteLen := len(helpPalette)
+	for i, r := range helpRunes {
+		colorIdx := (i + m.offset) % paletteLen
+		charStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(helpPalette[colorIdx])
+		helpSb.WriteString(charStyle.Render(string(r)))
+	}
+
+	helpStyle := lipgloss.NewStyle().
+		Margin(0, 2)
+
+	// Vertically join the title card and the animated gradient help line
+	renderedUI := lipgloss.JoinVertical(
+		lipgloss.Left,
+		cardStyle.Render(sb.String()),
+		helpStyle.Render(helpSb.String()),
+	)
+
+	return tea.NewView(renderedUI)
 }
 
 func initialModel() model {
 	return model{
-		msg: "H",
+		msg:    "H",
+		offset: 0,
 	}
 }
 
 func main() {
 	p := tea.NewProgram(initialModel())
 	if _, err := p.Run(); err != nil {
-        fmt.Printf("Alas, there's been an error: %v", err)
-        os.Exit(1)
-    }
-
-	
+		fmt.Printf("Alas, there's been an error: %v", err)
+		os.Exit(1)
+	}
 }
