@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -32,6 +34,20 @@ func init() {
 	}
 }
 
+// openFolderInExplorer opens the notes folder in the native file manager (Explorer, Finder, xdg-open)
+func openFolderInExplorer(path string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer", path)
+	case "darwin":
+		cmd = exec.Command("open", path)
+	default:
+		cmd = exec.Command("xdg-open", path)
+	}
+	return cmd.Start()
+}
+
 // loadSavedNotes reads all markdown (.md) notes from the user's notes directory
 func loadSavedNotes() []string {
 	entries, err := os.ReadDir(notesDir)
@@ -55,15 +71,32 @@ const (
 	stateContentEditing
 )
 
+// clearStatusMsg is fired by a timer to auto-dismiss status messages after 5 seconds
+type clearStatusMsg struct {
+	id int
+}
+
 type model struct {
 	state           sessionState
 	msg             string
+	statusID        int
 	offset          int
 	filenameInput   textinput.Model
 	contentArea     textarea.Model
 	currentFilename string
 	savedNotes      []string
 	selectedIndex   int
+	hoveredIndex    int
+}
+
+// setStatus displays a message and automatically clears it after 5 seconds
+func (m *model) setStatus(text string) tea.Cmd {
+	m.msg = text
+	m.statusID++
+	id := m.statusID
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
+		return clearStatusMsg{id: id}
+	})
 }
 
 // openNote loads note content from disk into the textarea editor
@@ -71,15 +104,14 @@ func (m *model) openNote(filename string) tea.Cmd {
 	targetPath := filepath.Join(notesDir, filename)
 	content, err := os.ReadFile(targetPath)
 	if err != nil {
-		m.msg = fmt.Sprintf("Error opening note: %v", err)
-		return nil
+		return m.setStatus(fmt.Sprintf("Error opening note: %v", err))
 	}
 
 	m.currentFilename = filename
 	m.contentArea.Reset()
 	m.contentArea.SetValue(string(content))
 	m.state = stateContentEditing
-	m.msg = fmt.Sprintf("Editing %s", filename)
+	m.msg = ""
 	return m.contentArea.Focus()
 }
 
@@ -101,20 +133,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 
-	// Mouse event support: click on any note to open it
-	case tea.MouseClickMsg:
+	// Auto-dismiss status notification when 5-second timer expires
+	case clearStatusMsg:
+		if msg.id == m.statusID {
+			m.msg = ""
+		}
+		return m, nil
+
+	// Mouse hover tracking to highlight notes
+	case tea.MouseMotionMsg:
 		if m.state == stateDefault && len(m.savedNotes) > 0 {
-			// Title card height: 5 lines (rows 0..4)
-			// content margin-top: 1 line (row 5)
-			// "Saved Notes" header: row 6
-			// blank line: row 7
-			// Notes list start at row 8
-			clickedRow := msg.Y
-			noteIdx := clickedRow - 8
-			if noteIdx >= 0 && noteIdx < len(m.savedNotes) {
-				m.selectedIndex = noteIdx
-				cmd := m.openNote(m.savedNotes[noteIdx])
-				return m, cmd
+			hoverRow := msg.Y - 8
+			if hoverRow >= 0 && hoverRow < len(m.savedNotes) {
+				m.hoveredIndex = hoverRow
+				m.selectedIndex = hoverRow
+			} else {
+				m.hoveredIndex = -1
+			}
+		}
+
+	// Mouse click support
+	case tea.MouseClickMsg:
+		if m.state == stateDefault {
+			// Clicking on row 6 (the folder path header) opens the folder in Explorer/Finder
+			if msg.Y == 6 {
+				if err := openFolderInExplorer(notesDir); err != nil {
+					return m, m.setStatus(fmt.Sprintf("Error opening folder: %v", err))
+				}
+				return m, m.setStatus("Opened notes folder in file explorer")
+			}
+
+			// Clicking on a note in the list opens that note
+			if len(m.savedNotes) > 0 {
+				clickedRow := msg.Y - 8
+				if clickedRow >= 0 && clickedRow < len(m.savedNotes) {
+					m.selectedIndex = clickedRow
+					cmd := m.openNote(m.savedNotes[clickedRow])
+					return m, cmd
+				}
 			}
 		}
 
@@ -132,6 +188,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "q":
 				return m, tea.Quit
+
+			case "o", "ctrl+o":
+				// Open notes folder in file explorer
+				if err := openFolderInExplorer(notesDir); err != nil {
+					return m, m.setStatus(fmt.Sprintf("Error opening folder: %v", err))
+				}
+				return m, m.setStatus("Opened notes folder in file explorer")
 
 			case "up", "k":
 				if len(m.savedNotes) > 0 && m.selectedIndex > 0 {
@@ -165,8 +228,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateDefault
 				m.filenameInput.Blur()
 				m.filenameInput.Reset()
-				m.msg = "Cancelled new note"
-				return m, nil
+				return m, m.setStatus("Cancelled new note")
 
 			case "enter":
 				rawName := strings.TrimSpace(m.filenameInput.Value())
@@ -182,8 +244,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Check for DUPLICATE filename using os.Stat()
 				targetPath := filepath.Join(notesDir, rawName)
 				if _, err := os.Stat(targetPath); err == nil {
-					m.msg = fmt.Sprintf("⚠️ File %q already exists! Choose another name.", rawName)
-					return m, nil // Stay in filename input
+					return m, m.setStatus(fmt.Sprintf("⚠️ File %q already exists! Choose another name.", rawName))
 				}
 
 				m.currentFilename = rawName
@@ -204,26 +265,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateDefault
 				m.contentArea.Blur()
 				m.contentArea.Reset()
-				m.msg = "Closed note editor"
-				return m, nil
+				return m, m.setStatus("Closed note editor")
 
 			case "ctrl+s":
 				// Save note file to notes directory
 				targetPath := filepath.Join(notesDir, m.currentFilename)
 				content := m.contentArea.Value()
 
+				var cmd tea.Cmd
 				err := os.WriteFile(targetPath, []byte(content), 0644)
 				if err != nil {
-					m.msg = fmt.Sprintf("Error saving note: %v", err)
+					cmd = m.setStatus(fmt.Sprintf("Error saving note: %v", err))
 				} else {
-					m.msg = fmt.Sprintf("Saved note to %s", m.currentFilename)
 					m.savedNotes = loadSavedNotes()
+					cmd = m.setStatus(fmt.Sprintf("Saved note to %s", m.currentFilename))
 				}
 
 				m.state = stateDefault
 				m.contentArea.Blur()
 				m.contentArea.Reset()
-				return m, nil
+				return m, cmd
 			}
 
 			var cmd tea.Cmd
@@ -348,24 +409,42 @@ func (m model) View() tea.View {
 		var notesSb strings.Builder
 
 		if len(m.savedNotes) > 0 {
+			// Clickable folder path header
+			folderBadge := lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("#8BE9FD")).
+				Render(notesDir + " ↗")
+
 			notesHeader := lipgloss.NewStyle().
 				Bold(true).
 				Foreground(lipgloss.Color("#BD93F9")).
-				Render(fmt.Sprintf("📒 Saved Notes (%d in %s):", len(m.savedNotes), notesDir))
+				Render(fmt.Sprintf("📒 Saved Notes (%d in ", len(m.savedNotes))) +
+				folderBadge +
+				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#BD93F9")).Render("):")
+
 			notesSb.WriteString(notesHeader + "\n\n")
 
 			for i, n := range m.savedNotes {
-				prefix := "   "
-				style := lipgloss.NewStyle().Foreground(lipgloss.Color("#F8F8F2"))
+				var itemText string
 				if i == m.selectedIndex {
-					prefix = " 👉 "
-					style = lipgloss.NewStyle().
+					// Clean highlight on hover/selection (no hyperlinks = no terminal tooltip popups)
+					highlightStyle := lipgloss.NewStyle().
 						Bold(true).
-						Foreground(lipgloss.Color("#50FA7B")).
-						Underline(true)
+						Foreground(lipgloss.Color("#50FA7B"))
+					symbolStyle := lipgloss.NewStyle().
+						Bold(true).
+						Foreground(lipgloss.Color("#8BE9FD"))
+
+					itemText = highlightStyle.Render(fmt.Sprintf("  %d. %s", i+1, n)) + " " + symbolStyle.Render("↗")
+				} else {
+					normalStyle := lipgloss.NewStyle().
+						Foreground(lipgloss.Color("#F8F8F2"))
+					symbolStyle := lipgloss.NewStyle().
+						Foreground(lipgloss.Color("#6272A4"))
+
+					itemText = normalStyle.Render(fmt.Sprintf("  %d. %s", i+1, n)) + " " + symbolStyle.Render("↗")
 				}
-				noteItem := style.Render(fmt.Sprintf("%s%d. %s  (click to open)", prefix, i+1, n))
-				notesSb.WriteString(noteItem + "\n")
+				notesSb.WriteString(itemText + "\n")
 			}
 		} else {
 			emptyNotice := lipgloss.NewStyle().
@@ -385,7 +464,7 @@ func (m model) View() tea.View {
 	}
 
 	// Dynamic help text
-	help := "Ctrl+N: New Note | Click/Enter: Open Note | ↑/↓: Select | Ctrl+Q: Quit"
+	help := "Ctrl+N: New Note | Click/Enter: Open Note | O: Open Folder | Ctrl+Q: Quit"
 	if m.state == stateFilenameInput {
 		help = "Enter: Continue to Editor | Esc: Cancel | Ctrl+Q: Quit"
 	} else if m.state == stateContentEditing {
@@ -426,7 +505,7 @@ func (m model) View() tea.View {
 
 	v := tea.NewView(renderedUI)
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion // Enables mouse click events in the terminal
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
@@ -463,6 +542,7 @@ func initialModel() model {
 		contentArea:   ta,
 		savedNotes:    loadSavedNotes(),
 		selectedIndex: 0,
+		hoveredIndex:  -1,
 	}
 }
 
