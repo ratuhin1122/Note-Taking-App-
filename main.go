@@ -160,14 +160,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.setStatus("Opened notes folder in file explorer")
 			}
 
-			// Forward mouse click to bubbles list component
-			var cmd tea.Cmd
-			m.notesList, cmd = m.notesList.Update(msg)
-			if selected, ok := m.notesList.SelectedItem().(noteItem); ok {
-				openCmd := m.openNote(selected.filename)
-				return m, tea.Batch(cmd, openCmd)
-			}
-			return m, cmd
+			// Mouse events are disabled for the notes list; keyboard navigation (Enter, arrows) is used instead
+			return m, nil
 		}
 
 	case tea.KeyPressMsg:
@@ -314,6 +308,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	} else if m.state == stateDefault {
+		// Forward component messages (such as list.FilterMatchesMsg and cursor blinks) to the list
+		if _, isTick := msg.(tickMsg); !isTick {
+			var cmd tea.Cmd
+			m.notesList, cmd = m.notesList.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -426,6 +429,14 @@ func (m model) View() tea.View {
 				folderBadge +
 				lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#BD93F9")).Render("):")
 
+			if m.notesList.IsFiltered() {
+				filterBadge := lipgloss.NewStyle().
+					Bold(true).
+					Foreground(lipgloss.Color("#50FA7B")).
+					Render(fmt.Sprintf(" [Filter: %q]", m.notesList.FilterValue()))
+				notesHeader += filterBadge
+			}
+
 			notesSb.WriteString(notesHeader + "\n\n")
 
 			// Render the bubbles list component
@@ -453,6 +464,10 @@ func (m model) View() tea.View {
 		help = "Enter: Continue to Editor | Esc: Cancel | Ctrl+Q: Quit"
 	} else if m.state == stateContentEditing {
 		help = "Ctrl+S: Save Note | Esc: Close Editor | Ctrl+Q: Quit"
+	} else if m.notesList.FilterState() == list.Filtering {
+		help = "Enter: Apply Filter | Esc: Cancel Filter | Ctrl+Q: Quit"
+	} else if m.notesList.FilterState() == list.FilterApplied {
+		help = "Enter: Open Note | Esc: Clear Filter | /: Edit Filter | Ctrl+Q: Quit"
 	}
 	helpRunes := []rune(help)
 
