@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
@@ -63,6 +64,15 @@ func loadSavedNotes() []string {
 	return list
 }
 
+// noteItem implements bubbles list.DefaultItem interface
+type noteItem struct {
+	filename string
+}
+
+func (i noteItem) Title() string       { return i.filename + " ↗" }
+func (i noteItem) Description() string { return "" }
+func (i noteItem) FilterValue() string { return i.filename }
+
 type sessionState int
 
 const (
@@ -83,10 +93,9 @@ type model struct {
 	offset          int
 	filenameInput   textinput.Model
 	contentArea     textarea.Model
+	notesList       list.Model
 	currentFilename string
 	savedNotes      []string
-	selectedIndex   int
-	hoveredIndex    int
 }
 
 // setStatus displays a message and automatically clears it after 5 seconds
@@ -140,18 +149,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	// Mouse hover tracking to highlight notes
-	case tea.MouseMotionMsg:
-		if m.state == stateDefault && len(m.savedNotes) > 0 {
-			hoverRow := msg.Y - 8
-			if hoverRow >= 0 && hoverRow < len(m.savedNotes) {
-				m.hoveredIndex = hoverRow
-				m.selectedIndex = hoverRow
-			} else {
-				m.hoveredIndex = -1
-			}
-		}
-
 	// Mouse click support
 	case tea.MouseClickMsg:
 		if m.state == stateDefault {
@@ -163,15 +160,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.setStatus("Opened notes folder in file explorer")
 			}
 
-			// Clicking on a note in the list opens that note
-			if len(m.savedNotes) > 0 {
-				clickedRow := msg.Y - 8
-				if clickedRow >= 0 && clickedRow < len(m.savedNotes) {
-					m.selectedIndex = clickedRow
-					cmd := m.openNote(m.savedNotes[clickedRow])
-					return m, cmd
-				}
+			// Forward mouse click to bubbles list component
+			var cmd tea.Cmd
+			m.notesList, cmd = m.notesList.Update(msg)
+			if selected, ok := m.notesList.SelectedItem().(noteItem); ok {
+				openCmd := m.openNote(selected.filename)
+				return m, tea.Batch(cmd, openCmd)
 			}
+			return m, cmd
 		}
 
 	case tea.KeyPressMsg:
@@ -185,6 +181,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.state {
 
 		case stateDefault:
+			// If user is currently typing inside the list's fuzzy search filter
+			if m.notesList.FilterState() == list.Filtering {
+				var cmd tea.Cmd
+				m.notesList, cmd = m.notesList.Update(msg)
+				return m, cmd
+			}
+
 			switch msg.String() {
 			case "q":
 				return m, tea.Quit
@@ -196,21 +199,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.setStatus("Opened notes folder in file explorer")
 
-			case "up", "k":
-				if len(m.savedNotes) > 0 && m.selectedIndex > 0 {
-					m.selectedIndex--
-				}
-				return m, nil
-
-			case "down", "j":
-				if len(m.savedNotes) > 0 && m.selectedIndex < len(m.savedNotes)-1 {
-					m.selectedIndex++
-				}
-				return m, nil
-
 			case "enter":
-				if len(m.savedNotes) > 0 && m.selectedIndex >= 0 && m.selectedIndex < len(m.savedNotes) {
-					cmd := m.openNote(m.savedNotes[m.selectedIndex])
+				// Open the currently selected note in the bubbles list
+				if selected, ok := m.notesList.SelectedItem().(noteItem); ok {
+					cmd := m.openNote(selected.filename)
 					return m, cmd
 				}
 				return m, nil
@@ -221,6 +213,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filenameInput.Reset()
 				return m, m.filenameInput.Focus()
 			}
+
+			// Forward navigation keys (Up, Down, PageUp, PageDown, /) to bubbles list
+			var cmd tea.Cmd
+			m.notesList, cmd = m.notesList.Update(msg)
+			return m, cmd
 
 		case stateFilenameInput:
 			switch msg.String() {
@@ -277,7 +274,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if err != nil {
 					cmd = m.setStatus(fmt.Sprintf("Error saving note: %v", err))
 				} else {
+					// Refresh notes and update bubbles list
 					m.savedNotes = loadSavedNotes()
+					newItems := make([]list.Item, len(m.savedNotes))
+					for i, n := range m.savedNotes {
+						newItems[i] = noteItem{filename: n}
+					}
+					m.notesList.SetItems(newItems)
+
 					cmd = m.setStatus(fmt.Sprintf("Saved note to %s", m.currentFilename))
 				}
 
@@ -424,28 +428,8 @@ func (m model) View() tea.View {
 
 			notesSb.WriteString(notesHeader + "\n\n")
 
-			for i, n := range m.savedNotes {
-				var itemText string
-				if i == m.selectedIndex {
-					// Clean highlight on hover/selection (no hyperlinks = no terminal tooltip popups)
-					highlightStyle := lipgloss.NewStyle().
-						Bold(true).
-						Foreground(lipgloss.Color("#50FA7B"))
-					symbolStyle := lipgloss.NewStyle().
-						Bold(true).
-						Foreground(lipgloss.Color("#8BE9FD"))
-
-					itemText = highlightStyle.Render(fmt.Sprintf("  %d. %s", i+1, n)) + " " + symbolStyle.Render("↗")
-				} else {
-					normalStyle := lipgloss.NewStyle().
-						Foreground(lipgloss.Color("#F8F8F2"))
-					symbolStyle := lipgloss.NewStyle().
-						Foreground(lipgloss.Color("#6272A4"))
-
-					itemText = normalStyle.Render(fmt.Sprintf("  %d. %s", i+1, n)) + " " + symbolStyle.Render("↗")
-				}
-				notesSb.WriteString(itemText + "\n")
-			}
+			// Render the bubbles list component
+			notesSb.WriteString(m.notesList.View())
 		} else {
 			emptyNotice := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#6272A4")).
@@ -464,7 +448,7 @@ func (m model) View() tea.View {
 	}
 
 	// Dynamic help text
-	help := "Ctrl+N: New Note | Click/Enter: Open Note | O: Open Folder | Ctrl+Q: Quit"
+	help := "Ctrl+N: New Note | Enter: Open Note | /: Filter | O: Open Folder | Ctrl+Q: Quit"
 	if m.state == stateFilenameInput {
 		help = "Enter: Continue to Editor | Esc: Cancel | Ctrl+Q: Quit"
 	} else if m.state == stateContentEditing {
@@ -534,15 +518,45 @@ func initialModel() model {
 	ta.SetWidth(65)
 	ta.SetHeight(10)
 
+	// Load initial notes and initialize Bubble Tea list component
+	saved := loadSavedNotes()
+	items := make([]list.Item, len(saved))
+	for i, n := range saved {
+		items[i] = noteItem{filename: n}
+	}
+
+	// Create Bubble Tea simple list delegate
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	delegate.SetHeight(1)
+	delegate.SetSpacing(0)
+
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("#50FA7B")).
+		Foreground(lipgloss.Color("#50FA7B")).
+		Bold(true).
+		Padding(0, 0, 0, 1)
+
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#F8F8F2")).
+		Padding(0, 0, 0, 2)
+
+	notesList := list.New(items, delegate, 65, 8)
+	notesList.SetShowTitle(false)
+	notesList.SetShowStatusBar(false)
+	notesList.SetShowHelp(false)
+	notesList.SetFilteringEnabled(true)
+	notesList.InfiniteScrolling = true
+
 	return model{
 		state:         stateDefault,
 		msg:           "",
 		offset:        0,
 		filenameInput: ti,
 		contentArea:   ta,
-		savedNotes:    loadSavedNotes(),
-		selectedIndex: 0,
-		hoveredIndex:  -1,
+		notesList:     notesList,
+		savedNotes:    saved,
 	}
 }
 
